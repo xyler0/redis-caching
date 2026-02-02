@@ -4,7 +4,7 @@ import Redis from 'ioredis';
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
-  private client: Redis;
+  private client!: Redis;
   private isConnected = false;
 
   async onModuleInit() {
@@ -46,7 +46,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.isConnected;
   }
 
-  async get(key: string): Promise {
+  async get(key: string): Promise<string | null> {
     if (!this.isHealthy()) {
       this.logger.warn(`Redis unavailable, skipping GET for key: ${key}`);
       return null;
@@ -60,7 +60,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async set(key: string, value: string, ttlSeconds?: number): Promise {
+  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
     if (!this.isHealthy()) {
       this.logger.warn(`Redis unavailable, skipping SET for key: ${key}`);
       return;
@@ -77,7 +77,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async del(key: string | string[]): Promise {
+  async del(key: string | string[]): Promise<void> {
     if (!this.isHealthy()) {
       return;
     }
@@ -93,7 +93,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async keys(pattern: string): Promise {
+  async keys(pattern: string): Promise<string[]> {
     if (!this.isHealthy()) {
       return [];
     }
