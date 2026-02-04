@@ -4,7 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "benchmark": "ts-node benchmarks/run-benchmarks.ts",
+    "test": "jest",
+    "seed": "ts-node prisma/seed.ts"
   },
   "keywords": [],
   "author": "",
