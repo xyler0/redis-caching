@@ -1,128 +1,119 @@
 import autocannon from 'autocannon';
-import { execSync } from 'child_process';
+import Redis from 'ioredis';
+import { PrismaService } from '../src/prisma/prisma.service';
 
 interface BenchmarkResult {
   scenario: string;
-  requests: number;
-  duration: number;
-  latencyAvg: number;
-  latencyP99: number;
-  throughput: number;
+  totalRequests: number;
+  avgLatencyMs: number;
+  p99LatencyMs: number;
+  throughputRps: number;
+}
+
+const BASE_URL = process.env.BASE_URL ?? 'http://127.0.0.1:3000';
+
+const prisma = new PrismaService();
+
+const redis = new Redis({
+  host: process.env.REDIS_HOST ?? '127.0.0.1',
+  port: Number(process.env.REDIS_PORT ?? 6379),
+});
+
+async function waitForServer(url: string, retries = 10) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok || res.status === 404) return;
+    } catch {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('Server not responding');
 }
 
 async function runBenchmark(
-  name: string,
+  scenario: string,
   url: string,
 ): Promise<BenchmarkResult> {
-  console.log(`\n🏃 Running: ${name}`);
-  console.log('='.repeat(60));
-
   const result = await autocannon({
     url,
-    connections: 10,
-    duration: 10,
-    pipelining: 1,
+    connections: 2,
+    duration: 5,
   });
 
-  console.log(`✅ Completed: ${name}`);
-  console.log(`   Requests: ${result.requests.total}`);
-  console.log(`   Latency (avg): ${result.latency.mean.toFixed(2)}ms`);
-  console.log(`   Latency (p99): ${result.latency.p99.toFixed(2)}ms`);
-  console.log(`   Throughput: ${result.throughput.mean.toFixed(2)} req/sec`);
-
   return {
-    scenario: name,
-    requests: result.requests.total,
-    duration: result.duration,
-    latencyAvg: result.latency.mean,
-    latencyP99: result.latency.p99,
-    throughput: result.throughput.mean,
+    scenario,
+    totalRequests: result.requests.total,
+    avgLatencyMs: result.latency.average,
+    p99LatencyMs: result.latency.p99,
+    throughputRps: result.requests.average,
   };
 }
 
 async function main() {
-  console.log('📊 Cache Performance Benchmarks\n');
+  console.log('\n📊 Cache Performance Benchmarks\n');
 
-  const baseUrl = 'http://localhost:3000';
+  await prisma.$connect();
+
+  await prisma.user.deleteMany({});
+  await prisma.role.deleteMany({});
+
+  const role = await prisma.role.create({
+    data: {
+      name: 'benchmark-role',
+      description: 'benchmark',
+    },
+  });
+
+  const user = await prisma.user.create({
+    data: {
+      email: 'bench@test.com',
+      name: 'Benchmark User',
+      bio: 'benchmark',
+      roleId: role.id,
+    },
+  });
+
+  const userUrl = `${BASE_URL}/users/${user.id}`;
+  const listUrl = `${BASE_URL}/users?page=1&limit=10`;
+
+  await waitForServer(userUrl);
+
   const results: BenchmarkResult[] = [];
 
-  // Ensure server is running
-  console.log('⏳ Waiting for server to be ready...');
-  await new Promise((resolve) => setTimeout(resolve, 2000));
+  // SCENARIO 1 — Cold single
+  await redis.flushall();
+  results.push(await runBenchmark('Cold Cache - Single User', userUrl));
 
-  // Benchmark 1: Cold cache (first request)
-  console.log('\n' + '='.repeat(60));
-  console.log('SCENARIO 1: Cold Cache (DB Query)');
-  console.log('='.repeat(60));
+  // SCENARIO 2 — Warm single
+  await fetch(userUrl);
+  results.push(await runBenchmark('Warm Cache - Single User', userUrl));
 
-  // Clear cache
-  execSync('docker exec redis_cache redis-cli FLUSHALL');
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  // SCENARIO 3 — Cold list
+  await redis.flushall();
+  results.push(await runBenchmark('Cold Cache - User List', listUrl));
 
-  results.push(await runBenchmark('Cold Cache - Single User', `${baseUrl}/users/1`));
+  // SCENARIO 4 — Warm list
+  await fetch(listUrl);
+  results.push(await runBenchmark('Warm Cache - User List', listUrl));
 
-  // Benchmark 2: Warm cache (subsequent requests)
-  console.log('\n' + '='.repeat(60));
-  console.log('SCENARIO 2: Warm Cache (Redis Hit)');
-  console.log('='.repeat(60));
+  console.log('\n================ Benchmark Summary ================\n');
 
-  // Prime the cache
-  await fetch(`${baseUrl}/users/1`);
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  for (const r of results) {
+    console.log(r.scenario);
+    console.log(`  Requests   : ${r.totalRequests}`);
+    console.log(`  Avg Latency: ${r.avgLatencyMs.toFixed(2)} ms`);
+    console.log(`  P99 Latency: ${r.p99LatencyMs.toFixed(2)} ms`);
+    console.log(`  Throughput : ${r.throughputRps.toFixed(2)} req/sec\n`);
+  }
 
-  results.push(await runBenchmark('Warm Cache - Single User', `${baseUrl}/users/1`));
-
-  // Benchmark 3: List endpoint (cold)
-  console.log('\n' + '='.repeat(60));
-  console.log('SCENARIO 3: List Endpoint (Cold Cache)');
-  console.log('='.repeat(60));
-
-  execSync('docker exec redis_cache redis-cli FLUSHALL');
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-
-  results.push(await runBenchmark('Cold Cache - User List', `${baseUrl}/users?page=1&limit=10`));
-
-  // Benchmark 4: List endpoint (warm)
-  console.log('\n' + '='.repeat(60));
-  console.log('SCENARIO 4: List Endpoint (Warm Cache)');
-  console.log('='.repeat(60));
-
-  await fetch(`${baseUrl}/users?page=1&limit=10`);
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  results.push(await runBenchmark('Warm Cache - User List', `${baseUrl}/users?page=1&limit=10`));
-
-  // Print comparison
-  console.log('\n\n📊 RESULTS COMPARISON');
-  console.log('='.repeat(100));
-  console.log('Scenario                     | Requests | Avg Latency | P99 Latency | Throughput   | Improvement');
-  console.log('-'.repeat(100));
-
-  const coldSingle = results[0];
-  const warmSingle = results[1];
-  const coldList = results[2];
-  const warmList = results[3];
-
-  const printRow = (result: BenchmarkResult, baseline?: BenchmarkResult) => {
-    const improvement = baseline
-      ? `${((baseline.latencyAvg / result.latencyAvg) * 100 - 100).toFixed(1)}%`
-      : '-';
-
-    const name = result.scenario.padEnd(28);
-    const reqs = result.requests.toString().padStart(8);
-    const avg = `${result.latencyAvg.toFixed(2)}ms`.padStart(11);
-    const p99 = `${result.latencyP99.toFixed(2)}ms`.padStart(11);
-    const throughput = `${result.throughput.toFixed(2)} req/s`.padStart(12);
-
-    console.log(`${name} | ${reqs} | ${avg} | ${p99} | ${throughput} | ${improvement}`);
-  };
-
-  printRow(coldSingle);
-  printRow(warmSingle, coldSingle);
-  printRow(coldList);
-  printRow(warmList, coldList);
-
-  console.log('\n✅ Benchmarks complete!\n');
+  await prisma.user.deleteMany({});
+  await prisma.role.deleteMany({});
+  await redis.quit();
+  await prisma.$disconnect();
 }
 
-main().catch(console.error);
+main().catch(async err => {
+  console.error(err);
+  await prisma.$disconnect();
+  process.exit(1);
+});
